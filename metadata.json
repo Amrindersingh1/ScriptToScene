@@ -1,0 +1,5 @@
+{
+  "name": "Script-to-Scene AI",
+  "description": "An AI-powered web app that transforms written scripts into dynamic scene visualizations by generating start and end frames, then interpolating them into cinematic video clips.",
+  "requestFramePermissions": []
+}
