@@ -160,14 +160,20 @@ export async function extractCharactersFromScript(script: string): Promise<Chara
     }
 }
 
-export async function generateImageForPrompt(prompt: string, aspectRatio: '16:9' | '1:1' = '16:9'): Promise<string> {
+export async function generateImageForPrompt(prompt: string, aspectRatio: '16:9' | '1:1' = '16:9', baseImages?: {inlineData: {data: string, mimeType: string}}[]): Promise<string> {
   const fullPrompt = `${prompt}. Aspect ratio: ${aspectRatio}.`;
+  
+  const parts: ({ text: string } | { inlineData: { data: string; mimeType: string; } })[] = [];
+  if (baseImages && baseImages.length > 0) {
+    parts.push(...baseImages);
+  }
+  parts.push({ text: fullPrompt });
+
+  const contents = { parts };
 
   const response = await callApiWithRetry(() => ai.models.generateContent({
     model: 'gemini-2.5-flash-image-preview',
-    contents: {
-      parts: [{ text: fullPrompt }],
-    },
+    contents: contents,
     config: {
       responseModalities: [Modality.IMAGE, Modality.TEXT],
     },
@@ -187,14 +193,14 @@ export async function generateImageForPrompt(prompt: string, aspectRatio: '16:9'
 
 
 export async function generateVideoForScene(prompt: string, startFrameBase64: string): Promise<string> {
-    const base64Data = startFrameBase64.split(',')[1];
+    const [mimeType, base64Data] = startFrameBase64.split(';base64,');
     
     let operation = await callApiWithRetry(() => ai.models.generateVideos({
         model: 'veo-2.0-generate-001',
         prompt: prompt,
         image: {
             imageBytes: base64Data,
-            mimeType: 'image/png',
+            mimeType: mimeType.replace('data:', ''),
         },
         config: {
             numberOfVideos: 1,
@@ -206,9 +212,15 @@ export async function generateVideoForScene(prompt: string, startFrameBase64: st
         operation = await callApiWithRetry(() => ai.operations.getVideosOperation({ operation: operation }));
     }
 
+    if (operation.error) {
+        console.error('Video generation operation failed:', operation.error);
+        const errorMessage = (operation.error as any).message || 'Unknown video generation error';
+        throw new Error(`Video generation failed: ${errorMessage}`);
+    }
+
     const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
     if (!downloadLink) {
-        throw new Error("Video generation completed, but no download link was found.");
+        throw new Error("Video generation completed, but no download link was found. The model may have been unable to process the request.");
     }
 
     const videoResponse = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);

@@ -21,12 +21,53 @@ const MetadataItem: React.FC<{ label: string; value: string | string[] }> = ({ l
     </div>
 );
 
+const FrameDisplay: React.FC<{
+  title: string,
+  frame: Frame,
+  isLoading: boolean,
+  onPromptChange: (newPrompt: string) => void,
+  onRegenerate: () => void,
+  isDisabled: boolean,
+}> = ({ title, frame, isLoading, onPromptChange, onRegenerate, isDisabled }) => (
+    <div className="flex-1 flex flex-col">
+        <h5 className="text-sm font-medium text-text-secondary mb-1">{title}</h5>
+        <div className="aspect-video bg-brand-bg rounded border border-dashed border-border-color flex items-center justify-center overflow-hidden shrink-0">
+            {isLoading ? (
+                <div className="w-6 h-6 border-2 border-secondary border-t-transparent rounded-full animate-spin"></div>
+            ) : frame.imageUrl ? (
+                <img src={frame.imageUrl} alt={title} className="w-full h-full object-cover" />
+            ) : (
+                <ImageIcon className="w-8 h-8 text-border-color" />
+            )}
+        </div>
+        <div className="mt-2 flex flex-col gap-2">
+            <textarea
+                value={frame.prompt}
+                onChange={(e) => onPromptChange(e.target.value)}
+                placeholder={`Prompt for ${title}...`}
+                className="w-full text-xs h-24 p-2 bg-brand-bg border border-border-color rounded focus:ring-1 focus:ring-primary focus:outline-none transition-shadow duration-200 resize-y"
+                disabled={isDisabled}
+                aria-label={`${title} prompt`}
+            />
+            <button
+                onClick={onRegenerate}
+                disabled={isDisabled || isLoading || !frame.prompt.trim()}
+                className="text-xs w-full flex items-center justify-center gap-1 px-2 py-1 bg-primary/20 text-primary-hover font-semibold rounded hover:bg-primary/30 disabled:bg-gray-700 disabled:text-text-secondary disabled:cursor-not-allowed transition-colors"
+            >
+                {isLoading ? <><Loader /> Regenerating...</> : 'Regenerate'}
+            </button>
+        </div>
+    </div>
+);
+
+
 export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, characters, selectedStyle }) => {
   const [startFrame, setStartFrame] = useState<Frame>({ prompt: '', imageUrl: null });
   const [endFrame, setEndFrame] = useState<Frame>({ prompt: '', imageUrl: null });
   const [videoState, setVideoState] = useState<VideoState>({ status: VideoStatus.IDLE, url: null, message: '' });
   
-  const [isGeneratingImages, setIsGeneratingImages] = useState(false);
+  const [isGeneratingStartFrame, setIsGeneratingStartFrame] = useState(false);
+  const [isGeneratingEndFrame, setIsGeneratingEndFrame] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [currentLoadingMessage, setCurrentLoadingMessage] = useState(VIDEO_GENERATION_MESSAGES[0]);
@@ -51,7 +92,13 @@ export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, charac
     const characterDetails = scene.characters
         .map(charName => {
             const charData = characters.find(c => c.name.toLowerCase() === charName.toLowerCase());
-            return charData ? `${charData.name} (${charData.description})` : charName;
+            if (charData) {
+                const charDescription = charData.imageUrl 
+                    ? `who looks like the provided image reference` 
+                    : `(${charData.description})`;
+                return `${charData.name} ${charDescription}`;
+            }
+            return charName;
         })
         .join(', ');
 
@@ -71,23 +118,76 @@ export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, charac
     generatePrompts();
   }, [generatePrompts]);
 
-  const handleGenerateImages = useCallback(async () => {
-    setIsGeneratingImages(true);
+ const getBase64Data = (dataUrl: string) => {
+    const [header, data] = dataUrl.split(',');
+    const mimeType = header.match(/:(.*?);/)?.[1];
+    return { data, mimeType: mimeType || 'image/png' };
+  };
+
+  const handleGenerateStartFrame = useCallback(async () => {
+    setIsGeneratingStartFrame(true);
     setError(null);
     try {
-      const [startImageUrl, endImageUrl] = await Promise.all([
-        generateImageForPrompt(startFrame.prompt, '16:9'),
-        generateImageForPrompt(endFrame.prompt, '16:9')
-      ]);
-      setStartFrame(f => ({ ...f, imageUrl: startImageUrl }));
-      setEndFrame(f => ({ ...f, imageUrl: endImageUrl }));
+      const sceneCharacterNames = scene.characters.map(c => c.toLowerCase());
+      const relevantCharacters = characters.filter(
+        c => c.imageUrl && sceneCharacterNames.includes(c.name.toLowerCase())
+      );
+      
+      const baseImages = relevantCharacters.map(char => {
+        const { data, mimeType } = getBase64Data(char.imageUrl!);
+        return { inlineData: { data, mimeType } };
+      });
+      
+      const imageUrl = await generateImageForPrompt(startFrame.prompt, '16:9', baseImages);
+      setStartFrame(f => ({ ...f, imageUrl }));
+      return imageUrl;
     } catch (err) {
-      console.error("Image generation failed:", err);
-      setError(`Failed to generate images: ${getApiErrorMessage(err)}`);
+      console.error("Start frame generation failed:", err);
+      setError(`Failed to generate start frame: ${getApiErrorMessage(err)}`);
+      throw err; // re-throw to stop sequence
     } finally {
-      setIsGeneratingImages(false);
+      setIsGeneratingStartFrame(false);
     }
-  }, [startFrame.prompt, endFrame.prompt]);
+  }, [startFrame.prompt, scene.characters, characters]);
+  
+  const handleGenerateEndFrame = useCallback(async (startFrameImageUrl: string) => {
+    setIsGeneratingEndFrame(true);
+    setError(null);
+    try {
+      const { data: startFrameData, mimeType: startFrameMimeType } = getBase64Data(startFrameImageUrl);
+      const startFrameImage = { inlineData: { data: startFrameData, mimeType: startFrameMimeType } };
+      
+      const sceneCharacterNames = scene.characters.map(c => c.toLowerCase());
+      const relevantCharacters = characters.filter(
+        c => c.imageUrl && sceneCharacterNames.includes(c.name.toLowerCase())
+      );
+      
+      const characterImages = relevantCharacters.map(char => {
+        const { data, mimeType } = getBase64Data(char.imageUrl!);
+        return { inlineData: { data, mimeType } };
+      });
+
+      const baseImages = [startFrameImage, ...characterImages];
+      const imageUrl = await generateImageForPrompt(endFrame.prompt, '16:9', baseImages);
+      setEndFrame(f => ({ ...f, imageUrl }));
+    } catch (err) {
+      console.error("End frame generation failed:", err);
+      setError(`Failed to generate end frame: ${getApiErrorMessage(err)}`);
+    } finally {
+      setIsGeneratingEndFrame(false);
+    }
+  }, [endFrame.prompt, scene.characters, characters]);
+
+  const handleGenerateImages = useCallback(async () => {
+    try {
+      const newStartFrameUrl = await handleGenerateStartFrame();
+      if (newStartFrameUrl) {
+          await handleGenerateEndFrame(newStartFrameUrl);
+      }
+    } catch(err) {
+      // Error is already set by individual generation functions
+    }
+  }, [handleGenerateStartFrame, handleGenerateEndFrame]);
 
   const handleGenerateVideo = useCallback(async () => {
     if (!startFrame.imageUrl) {
@@ -103,13 +203,16 @@ export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, charac
         setVideoState({ status: VideoStatus.DONE, url: videoUrl, message: '' });
     } catch (err) {
         console.error("Video generation failed:", err);
-        setError(`Failed to generate video. ${getApiErrorMessage(err)} This is an experimental feature and may fail. Please try again.`);
+        const message = err instanceof Error ? err.message : 'An unknown error occurred.';
+        setError(`${message} This is an experimental feature and may fail. Please try again.`);
         setVideoState({ status: VideoStatus.ERROR, url: null, message: '' });
     }
   }, [startFrame.imageUrl, scene]);
   
 
   const canGenerateVideo = startFrame.imageUrl && endFrame.imageUrl && videoState.status === VideoStatus.IDLE;
+  const isAnyImageLoading = isGeneratingStartFrame || isGeneratingEndFrame;
+  const isBusy = isAnyImageLoading || videoState.status === VideoStatus.GENERATING;
 
   return (
     <div className="bg-surface border border-border-color rounded-lg shadow-lg p-6 animate-fade-in">
@@ -125,17 +228,31 @@ export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, charac
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-4">
             {/* Image Generation Section */}
             <div>
-                 <h4 className="font-semibold text-text-main mb-2">Frames</h4>
+                 <h4 className="font-semibold text-text-main mb-2">Frames (Director Console)</h4>
                 <div className="flex flex-col md:flex-row gap-4">
-                    <FrameDisplay title="Start Frame" frame={startFrame} isLoading={isGeneratingImages} />
-                    <FrameDisplay title="End Frame" frame={endFrame} isLoading={isGeneratingImages} />
+                    <FrameDisplay
+                        title="Start Frame"
+                        frame={startFrame}
+                        isLoading={isGeneratingStartFrame}
+                        onPromptChange={(p) => setStartFrame(f => ({ ...f, prompt: p }))}
+                        onRegenerate={handleGenerateStartFrame}
+                        isDisabled={isBusy}
+                    />
+                    <FrameDisplay
+                        title="End Frame"
+                        frame={endFrame}
+                        isLoading={isGeneratingEndFrame}
+                        onPromptChange={(p) => setEndFrame(f => ({ ...f, prompt: p }))}
+                        onRegenerate={() => startFrame.imageUrl && handleGenerateEndFrame(startFrame.imageUrl)}
+                        isDisabled={isBusy || !startFrame.imageUrl}
+                    />
                 </div>
                  <button 
                     onClick={handleGenerateImages}
-                    disabled={isGeneratingImages || videoState.status === VideoStatus.GENERATING}
+                    disabled={isBusy}
                     className="mt-4 w-full flex items-center justify-center gap-2 px-4 py-2 bg-secondary/80 text-white font-semibold rounded-md hover:bg-secondary disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors"
                 >
-                    {isGeneratingImages ? <><Loader /> Generating Frames...</> : <><ImageIcon className="w-5 h-5" /> Generate Start & End Frames</>}
+                    {isAnyImageLoading ? <><Loader /> Generating Frames...</> : <><ImageIcon className="w-5 h-5" /> Generate Start & End Frames</>}
                 </button>
             </div>
             {/* Video Generation Section */}
@@ -166,23 +283,3 @@ export const SceneCard: React.FC<SceneCardProps> = ({ scene, sceneNumber, charac
     </div>
   );
 };
-
-const FrameDisplay: React.FC<{title: string, frame: Frame, isLoading: boolean}> = ({title, frame, isLoading}) => (
-    <div className="flex-1 flex flex-col">
-        <h5 className="text-sm font-medium text-text-secondary mb-1">{title}</h5>
-        <div className="aspect-video bg-brand-bg rounded border border-dashed border-border-color flex items-center justify-center overflow-hidden shrink-0">
-            {isLoading ? (
-                <div className="w-6 h-6 border-2 border-secondary border-t-transparent rounded-full animate-spin"></div>
-            ) : frame.imageUrl ? (
-                <img src={frame.imageUrl} alt={title} className="w-full h-full object-cover" />
-            ) : (
-                <ImageIcon className="w-8 h-8 text-border-color" />
-            )}
-        </div>
-        <div className="mt-2 p-2 bg-brand-bg rounded border border-border-color">
-            <p className="text-xs text-text-secondary break-words max-h-28 overflow-y-auto" role="log" aria-label={`${title} prompt`}>
-                <span className="font-semibold text-text-main">Prompt:</span> {frame.prompt || 'Prompt details will appear here.'}
-            </p>
-        </div>
-    </div>
-);
